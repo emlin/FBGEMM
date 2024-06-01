@@ -175,10 +175,13 @@ class SSDTableBatchedEmbeddingBags(nn.Module):
         logging.info(
             f"Using cache for SSD with admission algorithm "
             f"{CacheAlgorithm.LRU}, {cache_sets} sets, stored on {'DEVICE' if ssd_cache_location is EmbeddingLocation.DEVICE else 'MANAGED'} with {ssd_shards} shards, "
+            f"SSD storage directory: {ssd_storage_directory}, "
             f"Memtable Flush Period: {ssd_memtable_flush_period}, "
             f"Memtable Flush Offset: {ssd_memtable_flush_offset}, "
             f"Desired L0 files per compaction: {ssd_l0_files_per_compact}, "
-            f"{cache_size / 1024.0 / 1024.0 / 1024.0 : .2f}GB"
+            f"{cache_size / 1024.0 / 1024.0 / 1024.0 : .2f}GB, "
+            f"weights precision: {weights_precision}, "
+            f"output dtype: {output_dtype}"
         )
         self.register_buffer(
             "lxu_cache_state",
@@ -665,16 +668,23 @@ class SSDTableBatchedEmbeddingBags(nn.Module):
 
     def flush(self) -> None:
         active_slots_mask = self.lxu_cache_state != -1
-        active_weights = self.lxu_cache_weights.masked_select(
-            active_slots_mask.view(-1, 1)
+
+        active_slots_mask_cpu = active_slots_mask.cpu()
+        lxu_cache_weights_cpu = self.lxu_cache_weights.cpu()
+        lxu_cache_state_cpu = self.lxu_cache_state.cpu()
+
+        active_weights = lxu_cache_weights_cpu.masked_select(
+            active_slots_mask_cpu.view(-1, 1)
         ).view(-1, self.max_D)
-        active_ids = self.lxu_cache_state.view(-1).masked_select(
-            active_slots_mask.view(-1)
+        active_ids = lxu_cache_state_cpu.view(-1).masked_select(
+            active_slots_mask_cpu.view(-1)
         )
+
         torch.cuda.current_stream().wait_stream(self.ssd_stream)
+
         self.ssd_db.set_cuda(
-            active_ids.cpu(),
-            active_weights.cpu(),
+            active_ids,
+            active_weights,
             torch.tensor([active_ids.numel()]),
             self.timestep,
         )
